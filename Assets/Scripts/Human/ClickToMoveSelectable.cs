@@ -1,144 +1,114 @@
 using UnityEngine;
 using UnityEngine.AI;
 
-public class ClickMove_SimpleTurn : MonoBehaviour
+public class ClickMove_SimpleTurn_Refined : MonoBehaviour
 {
     [Header("Refs")]
-    public NavMeshAgent agent;           // Reference to the NavMeshAgent on this Capsule
-    public GameObject selectionRing;     // A flat ring to show when selected
+    public NavMeshAgent agent;           // Assign your own agent
+    public GameObject selectionRing;     // Child ring (inactive by default)
 
     [Header("Tuning")]
-    public float maxClickSampleDist = 3f; // Max distance from click to find a NavMesh point
-    public float rotateSpeed = 360f;      // Degrees per second for manual turning
-    public float facingTolerance = 5f;    // Degrees difference considered "aligned"
+    public float maxClickSampleDist = 3f; // Snap click to nearest NavMesh
+    public float rotateSpeed = 360f;      // deg/sec
+    public float facingTolerance = 5f;    // deg to consider "aligned"
 
-    // Internal state
-    bool selected, turning;
+    // State
+    bool turning;
     Vector3 target;
+
+    // Cache
     Collider selfCol;
 
     void Reset() => agent = GetComponent<NavMeshAgent>();
 
     void Awake()
     {
-        // Cache references
         if (!agent) agent = GetComponent<NavMeshAgent>();
         selfCol = GetComponent<Collider>();
         if (selectionRing) selectionRing.SetActive(false);
 
-        // We rotate manually instead of letting NavMeshAgent do it
+        // We handle rotation ourselves so we can "turn first, then move"
         agent.updateRotation = false;
         agent.autoBraking = true;
     }
 
     void Update()
     {
-        // --- Handle selection input ---
-        if (Input.GetMouseButtonDown(0)) // Left click
+        // LMB: select/deselect by clicking the capsule
+        if (Input.GetMouseButtonDown(0))
             SetSelected(RaycastHitsSelf());
 
-        if (!selected) return;
+        // If not selected, do nothing else this frame
+        if (selectionRing == null || !selectionRing.activeSelf)
+            return;
 
-        // --- Handle movement input ---
+        // RMB: set a new goal → rotate first
         if (Input.GetMouseButtonDown(1) && TryGetNavmeshPointFromClick(out target))
         {
-            // New target clicked: start rotation phase before moving
             turning = true;
             agent.isStopped = true;
         }
 
-        // --- State machine: turning or moving ---
-        if (turning) RotateTowardsTarget();
-        else CheckArrivalStop();
+        if (turning) RotateThenGo();
+        else if (Arrived()) agent.isStopped = true;
     }
 
-    /// <summary>
-    /// Rotates the capsule until it faces the target point. 
-    /// Once aligned (within facingTolerance), movement starts.
-    /// </summary>
-    void RotateTowardsTarget()
+    /// Rotates toward target; when aligned, starts NavMeshAgent movement.
+    void RotateThenGo()
     {
-        Vector3 dir = target - transform.position;
-        dir.y = 0f; // keep flat on ground
+        Vector3 dir = target - transform.position; dir.y = 0f;
+        if (dir.sqrMagnitude < 0.0001f) { turning = false; return; }
 
-        if (dir.sqrMagnitude < 0.0001f)
-        {
-            // Target too close, skip movement
-            turning = false;
-            return;
-        }
-
-        // Desired rotation to face the target
-        var desired = Quaternion.LookRotation(dir);
-
-        // Rotate smoothly towards target
+        Quaternion desired = Quaternion.LookRotation(dir);
         transform.rotation = Quaternion.RotateTowards(transform.rotation, desired, rotateSpeed * Time.deltaTime);
 
-        // Check if facing within tolerance
         if (Quaternion.Angle(transform.rotation, desired) <= facingTolerance)
         {
-            // Done turning → start moving
             turning = false;
             agent.isStopped = false;
             agent.SetDestination(target);
         }
     }
 
-    /// <summary>
-    /// Checks if the agent has arrived at the destination and stops it.
-    /// </summary>
-    void CheckArrivalStop()
+    /// True when the agent has effectively reached its destination.
+    bool Arrived()
     {
-        if (!agent.hasPath || agent.pathPending) return;
-
-        if (agent.remainingDistance <= Mathf.Max(agent.stoppingDistance, 0.05f) &&
-            agent.velocity.sqrMagnitude < 0.01f)
-        {
-            agent.isStopped = true;
-        }
+        if (!agent.hasPath || agent.pathPending) return false;
+        if (agent.remainingDistance == Mathf.Infinity) return false;
+        return agent.remainingDistance <= Mathf.Max(agent.stoppingDistance, 0.05f)
+               && agent.velocity.sqrMagnitude < 0.01f;
     }
 
-    /// <summary>
-    /// Shoots a ray from the mouse to the world and tries to find the nearest NavMesh point.
-    /// Returns true and the position if valid.
-    /// </summary>
+    /// Click → world ray → nearest NavMesh point (no layer masks needed).
     bool TryGetNavmeshPointFromClick(out Vector3 navPoint)
     {
         navPoint = default;
         if (!Camera.main) return false;
 
-        // Screen click → world ray
         Ray ray = Camera.main.ScreenPointToRay(Input.mousePosition);
-
-        // Hit something in the world
         if (!Physics.Raycast(ray, out var hit, 1000f, ~0, QueryTriggerInteraction.Ignore))
             return false;
 
-        // Snap to nearest NavMesh point
-        return NavMesh.SamplePosition(hit.point, out var navHit, maxClickSampleDist, NavMesh.AllAreas)
-            ? (navPoint = navHit.position, true).Item2
-            : false;
+        if (NavMesh.SamplePosition(hit.point, out var navHit, maxClickSampleDist, NavMesh.AllAreas))
+        {
+            navPoint = navHit.position;
+            return true;
+        }
+        return false;
     }
 
-    /// <summary>
-    /// Raycasts from the mouse and returns true if this capsule was hit.
-    /// Used to select/deselect with left click.
-    /// </summary>
+    /// Left-click hit test to toggle selection.
     bool RaycastHitsSelf()
     {
         if (!Camera.main) return false;
         Ray ray = Camera.main.ScreenPointToRay(Input.mousePosition);
-
-        return Physics.Raycast(ray, out var hit, 1000f, ~0, QueryTriggerInteraction.Ignore) 
+        return Physics.Raycast(ray, out var hit, 1000f, ~0, QueryTriggerInteraction.Ignore)
                && hit.collider == selfCol;
     }
 
-    /// <summary>
-    /// Sets selection state and shows/hides the ring.
-    /// </summary>
+    /// Selection is just the ring’s active state—no extra bool needed.
     void SetSelected(bool v)
     {
-        selected = v;
         if (selectionRing) selectionRing.SetActive(v);
     }
 }
